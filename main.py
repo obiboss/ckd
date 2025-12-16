@@ -65,12 +65,8 @@ class PredictResponse(BaseModel):
 # ------------------------------------------------------------
 app = FastAPI(title="CKD Risk Prediction API", version="0.1.0")
 
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://ckd-thesis.netlify.app/"
+origins = [   
+    "https://ckd-thesis.netlify.app"
 ]
 
 app.add_middleware(
