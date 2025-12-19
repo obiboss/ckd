@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import axios from "axios";
+import type { Patient } from "./PatientSelector";
 
 export type Gender = "Male" | "Female" | "Other";
 
@@ -14,14 +15,6 @@ export interface Comorbidities {
   anemia: boolean;
 }
 
-export interface LabVitalsPoint {
-  timestamp: string;
-  creatinine?: number;
-  albumin?: number;
-  systolic_bp?: number;
-  heart_rate?: number;
-}
-
 export interface PredictionResponse {
   risk_level: string;
   probability: number; // 0..1
@@ -29,16 +22,51 @@ export interface PredictionResponse {
   recommendations: string[];
 }
 
+export interface ReportInputs {
+  vitals: {
+    systolic_bp?: number;
+    diastolic_bp?: number;
+    heart_rate?: number;
+  };
+  urine: {
+    urine_protein_pct?: number;
+    urine_bacteria_pct?: number;
+  };
+  kft: {
+    creatinine?: number;
+    urea?: number;
+    albumin?: number;
+    sodium?: number;
+    potassium?: number;
+    bicarbonate?: number;
+  };
+  // series arrays to align with multi time-point support (keeps compatibility for existing consumers)
+  vitals_series: Array<{
+    systolic_bp?: number;
+    diastolic_bp?: number;
+    heart_rate?: number;
+  }>;
+  urine_series: Array<{
+    urine_protein_pct?: number;
+    urine_bacteria_pct?: number;
+  }>;
+  kft_series: Array<{
+    creatinine?: number;
+    urea?: number;
+    albumin?: number;
+    sodium?: number;
+    potassium?: number;
+    bicarbonate?: number;
+  }>;
+}
+
 interface Props {
-  onResult: (result: PredictionResponse) => void;
+  patient: Patient;
+  onResult: (result: PredictionResponse, report: ReportInputs) => void;
   onLoading?: (loading: boolean) => void;
 }
 
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
-export default function PatientForm({ onResult, onLoading }: Props) {
+export default function PatientForm({ patient, onResult, onLoading }: Props) {
   const [age, setAge] = useState<number | "">("");
   const [gender, setGender] = useState<Gender>("Male");
   const [comorbidities, setComorbidities] = useState<Comorbidities>({
@@ -46,40 +74,52 @@ export default function PatientForm({ onResult, onLoading }: Props) {
     hypertension: false,
     anemia: false,
   });
-  const [labVitals, setLabVitals] = useState<LabVitalsPoint[]>([
-    { timestamp: nowIso(), creatinine: undefined, albumin: undefined, systolic_bp: undefined, heart_rate: undefined },
-    { timestamp: nowIso(), creatinine: undefined, albumin: undefined, systolic_bp: undefined, heart_rate: undefined },
+
+  // Combined clinical readings (one time-point contains vitals, urine, kft)
+  const [readings, setReadings] = useState<
+    Array<{
+      vitals: {
+        systolic_bp?: number | "";
+        diastolic_bp?: number | "";
+        heart_rate?: number | "";
+      };
+      urine: {
+        urine_protein_pct?: number | "";
+        urine_bacteria_pct?: number | "";
+      };
+      kft: {
+        creatinine?: number | "";
+        urea?: number | "";
+        albumin?: number | "";
+        sodium?: number | "";
+        potassium?: number | "";
+        bicarbonate?: number | "";
+      };
+    }>
+  >([
+    {
+      vitals: {},
+      urine: {},
+      kft: {},
+    },
   ]);
+
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Prefill demographics from selected patient
+    setAge(patient.age);
+    setGender(patient.gender);
+  }, [patient]);
 
   function updateComorbidity(key: keyof Comorbidities, value: boolean) {
     setComorbidities((prev) => ({ ...prev, [key]: value }));
   }
 
-  function updateLabVitals(index: number, field: keyof LabVitalsPoint, value: string) {
-    setLabVitals((prev) => {
-      const next = [...prev];
-      const current = { ...next[index] };
-      if (field === "timestamp") {
-        current.timestamp = value;
-      } else {
-        // parse to number or undefined
-        const num = value === "" ? undefined : Number(value);
-        current[field] = isNaN(num as number) ? undefined : (num as number);
-      }
-      next[index] = current;
-      return next;
-    });
-  }
-
-  function addTimePoint() {
-    if (labVitals.length >= 3) return;
-    setLabVitals((prev) => [...prev, { timestamp: nowIso() }]);
-  }
-
-  function removeTimePoint(index: number) {
-    if (labVitals.length <= 1) return;
-    setLabVitals((prev) => prev.filter((_, i) => i !== index));
+  function parseNum(v: number | "" | null | undefined): number | undefined {
+    if (v === "" || v === null || v === undefined) return undefined;
+    const n = Number(v);
+    return isNaN(n) ? undefined : n;
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -97,29 +137,86 @@ export default function PatientForm({ onResult, onLoading }: Props) {
         return;
       }
 
-      const payload = {
-        demographics: {
-          age: parsedAge,
-          gender,
+      const vitalsSeries = readings.map((r) => ({
+        systolic_bp: parseNum(r.vitals.systolic_bp ?? ""),
+        diastolic_bp: parseNum(r.vitals.diastolic_bp ?? ""),
+        heart_rate: parseNum(r.vitals.heart_rate ?? ""),
+      }));
+      const urineSeries = readings.map((r) => ({
+        urine_protein_pct: parseNum(r.urine.urine_protein_pct ?? ""),
+        urine_bacteria_pct: parseNum(r.urine.urine_bacteria_pct ?? ""),
+      }));
+      const kftSeries = readings.map((r) => ({
+        creatinine: parseNum(r.kft.creatinine ?? ""),
+        urea: parseNum(r.kft.urea ?? ""),
+        albumin: parseNum(r.kft.albumin ?? ""),
+        sodium: parseNum(r.kft.sodium ?? ""),
+        potassium: parseNum(r.kft.potassium ?? ""),
+        bicarbonate: parseNum(r.kft.bicarbonate ?? ""),
+      }));
+
+      const firstVitals = vitalsSeries[0] ?? {};
+      const firstUrine = urineSeries[0] ?? {};
+      const firstKft = kftSeries[0] ?? {};
+
+      const reportInputs: ReportInputs = {
+        vitals: {
+          systolic_bp: firstVitals.systolic_bp,
+          diastolic_bp: firstVitals.diastolic_bp,
+          heart_rate: firstVitals.heart_rate,
         },
-        comorbidities,
-        lab_vitals: labVitals.map((p) => ({
-          timestamp: p.timestamp,
-          creatinine: p.creatinine,
-          albumin: p.albumin,
-          systolic_bp: p.systolic_bp,
-          heart_rate: p.heart_rate,
-        })),
+        urine: {
+          urine_protein_pct: firstUrine.urine_protein_pct,
+          urine_bacteria_pct: firstUrine.urine_bacteria_pct,
+        },
+        kft: {
+          creatinine: firstKft.creatinine,
+          urea: firstKft.urea,
+          albumin: firstKft.albumin,
+          sodium: firstKft.sodium,
+          potassium: firstKft.potassium,
+          bicarbonate: firstKft.bicarbonate,
+        },
+        vitals_series: vitalsSeries,
+        urine_series: urineSeries,
+        kft_series: kftSeries,
       };
 
+      const payload = {
+        patient_id: patient.patient_id,
+        demographics: { age: parsedAge, gender },
+        comorbidities,
+        // send arrays for time points
+        vitals: vitalsSeries,
+        urine: urineSeries,
+        kft: kftSeries,
+      };
+
+      const API_URL = import.meta.env.VITE_API_URL;
+      const token = localStorage.getItem("ckd_token");
+
       const res = await axios.post<PredictionResponse>(
-        "http://127.0.0.1:8000/api/v1/predict",
+        `${API_URL}/api/v1/predict`,
         payload,
-        { headers: { "Content-Type": "application/json" } }
+        {
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+        }
       );
-      onResult(res.data);
+
+      onResult(res.data, reportInputs);
     } catch (err: any) {
-      setError(err?.response?.data?.detail ?? "Request failed. Ensure backend is running.");
+      const detail = err?.response?.data?.detail;
+
+      if (Array.isArray(detail)) {
+        setError(detail.map((d) => d.msg).join(", "));
+      } else if (typeof detail === "string") {
+        setError(detail);
+      } else {
+        setError("Request failed. Please check the input values.");
+      }
     } finally {
       onLoading?.(false);
     }
@@ -131,20 +228,26 @@ export default function PatientForm({ onResult, onLoading }: Props) {
         <h2 className="text-lg font-semibold">Demographics & Comorbidities</h2>
         <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700">Age</label>
+            <label className="block text-sm font-medium text-gray-700">
+              Age
+            </label>
             <input
               type="number"
               min={0}
               max={120}
               value={age}
-              onChange={(e) => setAge(e.target.value === "" ? "" : Number(e.target.value))}
+              onChange={(e) =>
+                setAge(e.target.value === "" ? "" : Number(e.target.value))
+              }
               className="mt-1 w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
               placeholder="e.g. 68"
               required
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700">Gender</label>
+            <label className="block text-sm font-medium text-gray-700">
+              Gender
+            </label>
             <select
               value={gender}
               onChange={(e) => setGender(e.target.value as Gender)}
@@ -162,7 +265,9 @@ export default function PatientForm({ onResult, onLoading }: Props) {
             <input
               type="checkbox"
               checked={comorbidities.diabetes_mellitus}
-              onChange={(e) => updateComorbidity("diabetes_mellitus", e.target.checked)}
+              onChange={(e) =>
+                updateComorbidity("diabetes_mellitus", e.target.checked)
+              }
               className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
             />
             <span className="text-sm">Diabetes</span>
@@ -171,7 +276,9 @@ export default function PatientForm({ onResult, onLoading }: Props) {
             <input
               type="checkbox"
               checked={comorbidities.hypertension}
-              onChange={(e) => updateComorbidity("hypertension", e.target.checked)}
+              onChange={(e) =>
+                updateComorbidity("hypertension", e.target.checked)
+              }
               className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
             />
             <span className="text-sm">Hypertension</span>
@@ -188,89 +295,242 @@ export default function PatientForm({ onResult, onLoading }: Props) {
         </div>
       </div>
 
-      <div>
-        <h2 className="text-lg font-semibold">Minimal Lab/Vitals Time Points</h2>
-        <p className="text-sm text-gray-600">Provide 2–3 recent time points.</p>
-        <div className="mt-3 space-y-4">
-          {labVitals.map((row, idx) => (
-            <div key={idx} className="rounded-md border border-gray-200 p-3">
-              <div className="flex items-center justify-between">
-                <h3 className="font-medium text-gray-800">Time point {idx + 1}</h3>
-                <button
-                  type="button"
-                  onClick={() => removeTimePoint(idx)}
-                  className="text-xs text-red-600 hover:underline disabled:text-gray-400"
-                  disabled={labVitals.length <= 1}
-                >
-                  Remove
-                </button>
+      {readings.map((r, idx) => (
+        <div key={idx} className="space-y-4">
+          <h3 className="text-md font-semibold">Reading {idx + 1}</h3>
+
+          <div>
+            <h2 className="text-lg font-semibold">
+              VITAL SIGNS (BLOOD PRESSURE RESULTS)
+            </h2>
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700">
+                  Systolic Blood Pressure (mmHg)
+                </label>
+                <input
+                  type="number"
+                  step="1"
+                  value={r.vitals.systolic_bp ?? ""}
+                  onChange={(e) => {
+                    const next = [...readings];
+                    next[idx] = {
+                      ...next[idx],
+                      vitals: {
+                        ...next[idx].vitals,
+                        systolic_bp:
+                          e.target.value === "" ? "" : Number(e.target.value),
+                      },
+                    };
+                    setReadings(next);
+                  }}
+                  className="mt-1 w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                />
               </div>
-              <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Timestamp (ISO)</label>
-                  <input
-                    type="text"
-                    value={row.timestamp}
-                    onChange={(e) => updateLabVitals(idx, "timestamp", e.target.value)}
-                    className="mt-1 w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
-                    placeholder="2024-01-01T08:00:00Z"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Creatinine (mg/dL)</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={row.creatinine ?? ""}
-                    onChange={(e) => updateLabVitals(idx, "creatinine", e.target.value)}
-                    className="mt-1 w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Albumin (g/dL)</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={row.albumin ?? ""}
-                    onChange={(e) => updateLabVitals(idx, "albumin", e.target.value)}
-                    className="mt-1 w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Systolic BP (mmHg)</label>
-                  <input
-                    type="number"
-                    step="1"
-                    value={row.systolic_bp ?? ""}
-                    onChange={(e) => updateLabVitals(idx, "systolic_bp", e.target.value)}
-                    className="mt-1 w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Heart Rate (bpm)</label>
-                  <input
-                    type="number"
-                    step="1"
-                    value={row.heart_rate ?? ""}
-                    onChange={(e) => updateLabVitals(idx, "heart_rate", e.target.value)}
-                    className="mt-1 w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
-                  />
-                </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700">
+                  Diastolic Blood Pressure (mmHg)
+                </label>
+                <input
+                  type="number"
+                  step="1"
+                  value={r.vitals.diastolic_bp ?? ""}
+                  onChange={(e) => {
+                    const next = [...readings];
+                    next[idx] = {
+                      ...next[idx],
+                      vitals: {
+                        ...next[idx].vitals,
+                        diastolic_bp:
+                          e.target.value === "" ? "" : Number(e.target.value),
+                      },
+                    };
+                    setReadings(next);
+                  }}
+                  className="mt-1 w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700">
+                  Heart Rate (beats/min)
+                </label>
+                <input
+                  type="number"
+                  step="1"
+                  value={r.vitals.heart_rate ?? ""}
+                  onChange={(e) => {
+                    const next = [...readings];
+                    next[idx] = {
+                      ...next[idx],
+                      vitals: {
+                        ...next[idx].vitals,
+                        heart_rate:
+                          e.target.value === "" ? "" : Number(e.target.value),
+                      },
+                    };
+                    setReadings(next);
+                  }}
+                  className="mt-1 w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                />
               </div>
             </div>
-          ))}
+          </div>
+
+          <div>
+            <h2 className="text-lg font-semibold">
+              URINE ANALYSIS (NUMERIC APPROXIMATION)
+            </h2>
+            <p className="text-xs text-gray-600">
+              Numeric approximation used for academic demonstration purposes.
+            </p>
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700">
+                  Urine Protein (%)
+                </label>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={r.urine.urine_protein_pct ?? ""}
+                  onChange={(e) => {
+                    const next = [...readings];
+                    next[idx] = {
+                      ...next[idx],
+                      urine: {
+                        ...next[idx].urine,
+                        urine_protein_pct:
+                          e.target.value === "" ? "" : Number(e.target.value),
+                      },
+                    };
+                    setReadings(next);
+                  }}
+                  className="mt-1 w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700">
+                  Urine Bacteria (%)
+                </label>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={r.urine.urine_bacteria_pct ?? ""}
+                  onChange={(e) => {
+                    const next = [...readings];
+                    next[idx] = {
+                      ...next[idx],
+                      urine: {
+                        ...next[idx].urine,
+                        urine_bacteria_pct:
+                          e.target.value === "" ? "" : Number(e.target.value),
+                      },
+                    };
+                    setReadings(next);
+                  }}
+                  className="mt-1 w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <h2 className="text-lg font-semibold">
+              KIDNEY FUNCTION TEST (KFT) — BLOOD TEST
+            </h2>
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              <ArrayNumberField
+                label="Creatinine (mg/dL)"
+                value={r.kft.creatinine ?? ""}
+                onChange={(val) => {
+                  const next = [...readings];
+                  next[idx] = {
+                    ...next[idx],
+                    kft: { ...next[idx].kft, creatinine: val },
+                  };
+                  setReadings(next);
+                }}
+                step="0.01"
+              />
+              <ArrayNumberField
+                label="Urea (mg/dL)"
+                value={r.kft.urea ?? ""}
+                onChange={(val) => {
+                  const next = [...readings];
+                  next[idx] = {
+                    ...next[idx],
+                    kft: { ...next[idx].kft, urea: val },
+                  };
+                  setReadings(next);
+                }}
+                step="0.1"
+              />
+              <ArrayNumberField
+                label="Albumin (g/dL)"
+                value={r.kft.albumin ?? ""}
+                onChange={(val) => {
+                  const next = [...readings];
+                  next[idx] = {
+                    ...next[idx],
+                    kft: { ...next[idx].kft, albumin: val },
+                  };
+                  setReadings(next);
+                }}
+                step="0.01"
+              />
+              <ArrayNumberField
+                label="Sodium (mmol/L)"
+                value={r.kft.sodium ?? ""}
+                onChange={(val) => {
+                  const next = [...readings];
+                  next[idx] = {
+                    ...next[idx],
+                    kft: { ...next[idx].kft, sodium: val },
+                  };
+                  setReadings(next);
+                }}
+                step="0.1"
+              />
+              <ArrayNumberField
+                label="Potassium (mmol/L)"
+                value={r.kft.potassium ?? ""}
+                onChange={(val) => {
+                  const next = [...readings];
+                  next[idx] = {
+                    ...next[idx],
+                    kft: { ...next[idx].kft, potassium: val },
+                  };
+                  setReadings(next);
+                }}
+                step="0.1"
+              />
+              <ArrayNumberField
+                label="Bicarbonate (mEq/L)"
+                value={r.kft.bicarbonate ?? ""}
+                onChange={(val) => {
+                  const next = [...readings];
+                  next[idx] = {
+                    ...next[idx],
+                    kft: { ...next[idx].kft, bicarbonate: val },
+                  };
+                  setReadings(next);
+                }}
+                step="0.1"
+              />
+            </div>
+          </div>
         </div>
-        <div className="mt-3">
-          <button
-            type="button"
-            onClick={addTimePoint}
-            disabled={labVitals.length >= 3}
-            className="rounded-md bg-gray-100 px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-200 disabled:opacity-50"
-          >
-            + Add time point
-          </button>
-        </div>
+      ))}
+
+      <div className="pt-2">
+        <button
+          type="button"
+          className="rounded-md bg-gray-100 px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-200"
+          onClick={() =>
+            setReadings((prev) => [...prev, { vitals: {}, urine: {}, kft: {} }])
+          }
+        >
+          + Add another reading
+        </button>
       </div>
 
       {error && <p className="text-sm text-red-600">{error}</p>}
@@ -287,4 +547,56 @@ export default function PatientForm({ onResult, onLoading }: Props) {
   );
 }
 
+function NumberField({
+  label,
+  value,
+  setValue,
+  step,
+}: {
+  label: string;
+  value: number | "";
+  setValue: (v: number | "") => void;
+  step?: string;
+}) {
+  return (
+    <div>
+      <label className="block text-sm font-medium text-gray-700">{label}</label>
+      <input
+        type="number"
+        step={step ?? "1"}
+        value={value}
+        onChange={(e) =>
+          setValue(e.target.value === "" ? "" : Number(e.target.value))
+        }
+        className="mt-1 w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+      />
+    </div>
+  );
+}
 
+function ArrayNumberField({
+  label,
+  value,
+  onChange,
+  step,
+}: {
+  label: string;
+  value: number | "";
+  onChange: (v: number | "") => void;
+  step?: string;
+}) {
+  return (
+    <div>
+      <label className="block text-sm font-medium text-gray-700">{label}</label>
+      <input
+        type="number"
+        step={step ?? "1"}
+        value={value}
+        onChange={(e) =>
+          onChange(e.target.value === "" ? "" : Number(e.target.value))
+        }
+        className="mt-1 w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+      />
+    </div>
+  );
+}
